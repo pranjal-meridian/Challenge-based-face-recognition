@@ -11,6 +11,7 @@ import mediapipe as mp
 import cv2
 import requests
 from collections import defaultdict
+from bson import Binary
 
 
 app = Flask(__name__)
@@ -234,7 +235,6 @@ def log_verification():
 # registartion route
 @app.route("/register", methods=["POST"])
 def register():
-    # Get the images (front, left, right) from the form
     front_image = request.form.get("frontImage")
     left_image = request.form.get("leftImage")
     right_image = request.form.get("rightImage")
@@ -250,46 +250,57 @@ def register():
     if not all([front_image, left_image, right_image, name, email, password]):
         return jsonify({"status": "error", "message": "Missing required fields"}), 400  # Bad request
 
-    # Check if the user already exists
     if User.find_one({"email": email}):
         return jsonify({"status": "error", "message": "User already exists"}), 400
 
-    # Decode and save the images
-    images = [front_image, left_image, right_image]
+    # Decode and store the front image as a binary blob
+    front_image_data = base64.b64decode(front_image.split(",")[1])  
+    front_image_blob = Binary(front_image_data)  
+
+    images = [front_image, left_image, right_image] 
     embeddings = []
 
+    Timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+
     for i, img_data in enumerate(images):
-        img_data = img_data.split(",")[1]  # Remove base64 prefix
-        Timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        os.makedirs("images", exist_ok=True)
+        if i == 0:  
+            continue
+
+        img_data = img_data.split(",")[1]  
         filename = f'images/{Timestamp}_{i}.jpeg'
         with open(filename, "wb") as f:
             f.write(base64.b64decode(img_data))
 
-        # Load the image and extract embeddings
         img = cv2.imread(filename)
         faces = face.get(img)
 
         if len(faces) == 0:
             return jsonify({"status": "error", "message": f"No face detected in image {i + 1}"}), 400
 
-        # Extract the first detected face embedding
         embeddings.append(faces[0].embedding)
 
-    # Compute the average embedding
     avg_embedding = np.mean(embeddings, axis=0).tolist()
 
-    # Save user data along with the average face embedding
     User.insert_one({
         "name": name,
         "email": email,
         "password": password,
-        "images": images,  # Optionally store the image filenames
+        "user_image": front_image_blob,
         "face_embedding": avg_embedding,
         "timestamp": datetime.datetime.now()
     })
-    Logs.insert_one({"email": email, "name": name, "status": "In Process", "login_status": True, "verification_status": False,
-                     "detail": "Registered", "location": location_data, "timestamp": datetime.datetime.now()})
+
+    Logs.insert_one({
+        "email": email,
+        "name": name,
+        "status": "In Process",
+        "login_status": True,
+        "verification_status": False,
+        "detail": "Registered",
+        "location": location_data,
+        "timestamp": datetime.datetime.now()
+    })
+
     return jsonify({"status": "success"})
 
 

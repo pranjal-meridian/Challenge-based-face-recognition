@@ -10,6 +10,9 @@ from insightface.app import FaceAnalysis
 import mediapipe as mp
 import cv2
 import requests
+from dotenv import load_dotenv
+# from azure.storage.blob import BlobServiceClient
+import uuid
 from collections import defaultdict
 from bson import Binary
 
@@ -22,6 +25,7 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 img1_path = "test.png"
 
 # Connect to MongoDB
+
 URI = "mongodb://localhost:27017/"
 client = MongoClient('mongodb://localhost:27017/')
 db = client['Liveliness']
@@ -29,15 +33,33 @@ User = db['Users']
 Logs = db["Logs"]
 Admins = db["Admins"]
 
+# load_dotenv()
+# URI = os.getenv("mongo_URI")
+# client = MongoClient(URI)
+# db = client['Liveliness']
+# User = db['Users']
+# Logs = db["Logs"]
+# Admins = db["Admins"]
+
+# azure_string = os.getenv("azure_string")
+# container = os.getenv("container")
+# AZURE_CONNECTION_STRING = azure_string
+# AZURE_CONTAINER_NAME = container
+
+# blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+# container_client = blob_service_client.get_container_client(AZURE_CONTAINER_NAME)
+
+# def upload_to_azure_blob(file_bytes, filename):
+#     blob_name = f"{uuid.uuid4().hex}_{filename}"
+#     blob_client = container_client.get_blob_client(blob_name)
+#     blob_client.upload_blob(file_bytes, overwrite=True)
+#     return f"https://visiondetect.blob.core.windows.net/{AZURE_CONTAINER_NAME}/{blob_name}"
+
 face = FaceAnalysis(name="buffalo_l")
 face.prepare(ctx_id=0, det_size=(640, 640))
 
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-
-
-# tasks = ["Look Front", "Look Left", "Look Right", "Look Up", "Look Down"]
-# selected_task = ""
 
 
 def get_active_users_by_day():
@@ -209,12 +231,15 @@ def get_location(latitude, longitude):
 
 @app.route("/log-verification", methods=["POST"])
 def log_verification():
+    print("trying to set rejected")
     data = request.json
     email = data.get("email")
     latitude = data.get("latitude")
     time_taken = data.get("time_taken")
     longitude = data.get("longitude")
     location_data = get_location(latitude, longitude)
+    status = data.get("status", "Verified")  # default is "Verified"
+    detail = data.get("details", "Logged in Successfully")
 
 
     if not email:
@@ -222,7 +247,7 @@ def log_verification():
 
     result = Logs.find_one_and_update(
         {"email": email},
-        {"$set": {"verification_status": True, "status": "Verified", "detail": "Logged in Successfully",
+        {"$set": {"verification_status": True, "status": status, "detail": detail,
                   "location": location_data, "timestamp": datetime.datetime.now(), "time_taken": time_taken}},
         sort=[("timestamp", -1)]
     )
@@ -244,6 +269,8 @@ def register():
     latitude = request.form.get('latitude')
     longitude = request.form.get('longitude')
 
+    # os.makedirs("images", exist_ok=True)
+
     if latitude and longitude:
         location_data = get_location(latitude, longitude)
 
@@ -255,7 +282,9 @@ def register():
 
     # Decode and store the front image as a binary blob
     front_image_data = base64.b64decode(front_image.split(",")[1])  
-    front_image_blob = Binary(front_image_data)  
+    front_image_blob = Binary(front_image_data)
+
+    # front_image_url = upload_to_azure_blob(front_image_data, "front.jpeg")
 
     images = [front_image, left_image, right_image] 
     embeddings = []
@@ -285,6 +314,7 @@ def register():
         "name": name,
         "email": email,
         "password": password,
+        # "user_image": front_image_url,
         "user_image": front_image_blob,
         "face_embedding": avg_embedding,
         "timestamp": datetime.datetime.now()
@@ -342,16 +372,6 @@ def login():
     return jsonify({"status": "success", "message": "Login successful, proceed to verification", "is_admin": is_admin})
 
 
-''' use random function in frontend to send randomly selected task to backend at /verify route. This one has scalability issues '''
-
-
-# # route for sending random task to frontend
-# @app.route("/task", methods=["GET"])
-# def get_random_task():
-#     selected_task = random.choice(tasks)
-#     return jsonify({"task": selected_task})
-
-
 @app.route('/active-users', methods=['GET'])
 def active_users():
     data = get_active_users_by_day()
@@ -367,6 +387,7 @@ def get_auth_rates():
         "success": success_count,
         "failure": failure_count
     }
+
 
 # actual verification route
 @app.route('/verify', methods=['POST'])
@@ -441,7 +462,8 @@ def verify():
 
 @app.route("/get-logs", methods=["GET"])
 def get_logs():
-    logs = list(Logs.find().sort("timestamp", -1))  # Fetch logs in descending order
+    # logs = list(Logs.find().sort("timestamp", -1))  # Fetch logs in descending order
+    logs = list(Logs.find())
     for log in logs:
         log["_id"] = str(log["_id"])  # Convert ObjectId to string (for frontend)
     return jsonify(logs)
@@ -464,7 +486,7 @@ def get_avg_session_duration():
                     "date": {"$dateToString": {"format": "%Y-%m-%d", "date": "$timestamp"}},
                     "status": "$status"
                 },
-                "all_time_taken": {"$push": "$time_taken"}
+                "all_time_taken": {"$push": {"$ifNull": ["$time_taken", 0]}}
             }},
             {"$group": {
                 "_id": "$_id.date",
@@ -498,7 +520,7 @@ def get_avg_session_duration():
             {"$match": {"timestamp": {"$gte": start_date}}},
             {"$group": {
                 "_id": None,
-                "all_time_taken": {"$push": "$time_taken"}
+                "all_time_taken": {"$push": {"$ifNull": ["$time_taken", 0]}}
             }}
         ]
         last_7_days_result = list(Logs.aggregate(last_7_days_pipeline))
@@ -518,7 +540,7 @@ def get_avg_session_duration():
             {"$match": {"timestamp": {"$gte": previous_week_start, "$lte": previous_week_end}}},
             {"$group": {
                 "_id": None,
-                "all_time_taken": {"$push": "$time_taken"}
+                "all_time_taken": {"$push": {"$ifNull": ["$time_taken", 0]}}
             }}
         ]
         prev_week_results = list(Logs.aggregate(prev_week_pipeline))
@@ -547,6 +569,7 @@ def get_avg_session_duration():
         })
 
     except Exception as e:
+        print("Error fetching session duration:", str(e))
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -603,8 +626,6 @@ def get_user_stats():
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
-
-
 
 
 if __name__ == "__main__":

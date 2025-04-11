@@ -16,6 +16,7 @@ import uuid
 from collections import defaultdict
 from bson import Binary
 
+
 app = Flask(__name__)
 CORS(app)
 UPLOAD_FOLDER = '/path/to/the/uploads'
@@ -23,14 +24,6 @@ ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 img1_path = "test.png"
 
-# Connect to MongoDB
-# URI = "mongodb://localhost:27017/"
-# client = MongoClient(URI)
-# db = client['Liveliness']
-# User = db['Users']
-# Logs = db["Logs"]
-# Admins = db["Admins"]
-# ChallengeLogs = db["ChallengeLogs"]
 
 load_dotenv()
 URI = os.getenv("mongo_URI")
@@ -62,12 +55,8 @@ mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
 
-# tasks = ["Look Front", "Look Left", "Look Right", "Look Up", "Look Down"]
-# selected_task = ""
-
-
 def get_active_users_by_day():
-    today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)  # Set today to midnight UTC
+    today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     # Last 7 days (including today)
     last_7_days = [(today - datetime.timedelta(days=i)).strftime('%Y-%m-%d') for i in range(6, -1, -1)]
@@ -78,7 +67,7 @@ def get_active_users_by_day():
     # Query logs for the last 7 days with login_status true
     query = {
         "timestamp": {"$gte": today - datetime.timedelta(days=6), "$lt": today + datetime.timedelta(days=1)},
-        "login_success": True  # Only count successful logins
+        "login_status": True
     }
     all_logs = list(Logs.find(query))
 
@@ -233,7 +222,6 @@ def get_location(latitude, longitude):
         }
     return {"city": "Unknown", "state": "Unknown", "country": "Unknown"}
 
-
 @app.route("/log-verification", methods=["POST"])
 def log_verification():
     data = request.json
@@ -245,14 +233,14 @@ def log_verification():
     status = data.get("status", "Verified")  # default is "Verified"
     detail = data.get("details", "Logged in Successfully")
 
+
     if not email:
         return jsonify({"status": "error", "message": "Missing email"}), 400
 
     result = Logs.find_one_and_update(
         {"email": email},
         {"$set": {"verification_status": True, "status": status, "detail": detail,
-                  "location": location_data, "timestamp": datetime.datetime.now(), "time_taken": time_taken}}
-    )
+                  "location": location_data, "timestamp": datetime.datetime.now(), "time_taken": time_taken}})
     if result:
         return jsonify({"status": "success", "message": "Verified successfully in db."})
     else:
@@ -272,6 +260,7 @@ def register():
     longitude = request.form.get('longitude')
 
     # os.makedirs("images", exist_ok=True)
+    os.makedirs("images", exist_ok=True)
 
     if latitude and longitude:
         location_data = get_location(latitude, longitude)
@@ -316,7 +305,6 @@ def register():
         "name": name,
         "email": email,
         "password": password,
-        # "user_image": front_image_url,
         "user_image": front_image_blob,
         "face_embedding": avg_embedding,
         "timestamp": datetime.datetime.now()
@@ -340,41 +328,36 @@ def register():
 def login():
     data = request.json
     email = data.get("email")
-    name = User.find_one({"email": email})['name']
+    name = User.find_one({"email":email})['name']
     password = data.get("password")
     latitude = data.get("latitude")
     longitude = data.get("longitude")
     location_data = get_location(latitude, longitude) if latitude and longitude else {}
     if not email or not password:
-        Logs.insert_one(
-            {"email": email, "name": name, "status": "N/A", "login_success": False, "verification_status": False,
-             "detail": "Login Issue", "location": location_data, "timestamp": datetime.datetime.now()})
         return jsonify({"status": "error", "message": "Missing email or password"}), 400
 
     user = User.find_one({"email": email})
 
     if not user:
-        Logs.insert_one(
-            {"email": email, "name": name, "status": "Rejected", "login_success": False, "verification_status": False,
-             "detail": "Login Issue", "location": location_data, "timestamp": datetime.datetime.now()})
+        Logs.insert_one({"email": email, "name": name, "status": "Rejected", "login_status": False, "verification_status": False,
+                         "detail": "User not found", "location": location_data, "timestamp": datetime.datetime.now()})
         return jsonify({"status": "error", "message": "User not found"}), 404
 
     if user["password"] != password:
-        Logs.insert_one(
-            {"email": email, "name": name, "status": "Rejected", "login_success": False, "verification_status": False,
-             "detail": "Login Issue", "location": location_data, "timestamp": datetime.datetime.now()})
+        Logs.insert_one({"email": email, "name": name, "status": "Rejected", "login_status": False, "verification_status": False,
+                         "detail": "Invalid password", "location": location_data, "timestamp": datetime.datetime.now()})
         return jsonify({"status": "error", "message": "Invalid password"}), 401
 
     is_admin = Admins.find_one({"email": email}) is not None
     if is_admin:
         Logs.insert_one(
-            {"email": email, "name": name, "status": "Admin Login", "login_success": True, "verification_status": False,
+            {"email": email, "name": name, "status": "Admin Login", "login_status": True, "verification_status": False,
              "detail": "Admin Login", "location": location_data,
              "timestamp": datetime.datetime.now()})
         return jsonify(
             {"status": "success", "message": "Admin Login successful", "is_admin": is_admin})
 
-    Logs.insert_one({"email": email, "name": name, "status": "In Process", "login_success": True, "verification_status": False,
+    Logs.insert_one({"email": email, "name": name, "status": "In Process", "login_status": True, "verification_status": False,
                      "detail": "Passed login, awaiting verification", "location": location_data, "timestamp": datetime.datetime.now()})
     return jsonify({"status": "success", "message": "Login successful, proceed to verification", "is_admin": is_admin})
 
@@ -436,7 +419,7 @@ def verify():
 
         similarity = np.dot(normalize(captured_embedding), normalize(reference_embedding))
         print(similarity)
-        threshold = 0.6  # Adjust based on performance
+        threshold = 0.5  # Adjust based on performance
 
         # Check face match
         face_match = "Matched" if similarity >= threshold else "Not Matched"
@@ -445,6 +428,7 @@ def verify():
         liveness_status = check_liveness(img)
 
         # Task validation
+        task_validity = ""
         task_result = validate_task(img)
         print("Detected task", task_result)
 
@@ -461,26 +445,18 @@ def verify():
 
         if task_result == selected_task:
             task_validity = "Correct"
-
-            correct_task = "correct_"+selected_task
+            correct_task = "correct_" + selected_task
             ChallengeLogs.update_one(
                 {"email": email},
                 {"$inc": {correct_task: 1}}
             )
-
         else:
             task_validity = "Incorrect"
-
-            failed_task = "failed_"+selected_task
+            failed_task = "failed_" + selected_task
             ChallengeLogs.update_one(
                 {"email": email},
                 {"$inc": {failed_task: 1}}
             )
-
-        if face_match != "Matched" or liveness_status != "Live":
-            Logs.insert_one(
-                {"email": email, "status": "In Process", "login_success": False, "verification_status": False,
-                 "detail": "Invalid Attempt", "location": {}, "timestamp": datetime.datetime.now()})
 
         # Response
         return jsonify({
@@ -661,9 +637,7 @@ def get_user_stats():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-
-# route to get user issues like (login issue, task failed, status:Rejected)
-@app.route('/get-failed-task', methods=["GET"])
+@app.route('/get-failed-tasks', methods=["GET"])
 def get_failed_tasks():
     try:
         fields = [
@@ -680,13 +654,11 @@ def get_failed_tasks():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-# route to get top 4 users with most status:Rejected
 @app.route('/get-top-rejected-users', methods=["GET"])
 def get_top_rejected_users():
     try:
         # Fetch logs with status: Rejected
-        rejected_users = list(Logs.find({"status": "Rejected"}).sort("timestamp", -1))
+        rejected_users = list(Logs.find({"status": "Rejected"}))
 
         # Count occurrences of each user
         user_counts = defaultdict(int)

@@ -486,7 +486,7 @@ def get_avg_session_duration():
                     "date": {"$dateToString": {"format": "%Y-%m-%d", "date": "$timestamp"}},
                     "status": "$status"
                 },
-                "all_time_taken": {"$push": {"$ifNull": ["$time_taken", 0]}}
+                "all_time_taken": {"$push": "$time_taken"}
             }},
             {"$group": {
                 "_id": "$_id.date",
@@ -505,7 +505,7 @@ def get_avg_session_duration():
             for status_entry in entry["statuses"]:
                 if status_entry["status"] == "In Process":
                     in_process_found = True
-                session_times.extend(status_entry["time_taken"])
+                session_times.extend([time for time in status_entry["time_taken"] if time is not None])
 
             if in_process_found and session_times:
                 session_times[0] = 0
@@ -520,15 +520,14 @@ def get_avg_session_duration():
             {"$match": {"timestamp": {"$gte": start_date}}},
             {"$group": {
                 "_id": None,
-                "all_time_taken": {"$push": {"$ifNull": ["$time_taken", 0]}}
+                "all_time_taken": {"$push": "$time_taken"}
             }}
         ]
         last_7_days_result = list(Logs.aggregate(last_7_days_pipeline))
 
         if last_7_days_result and last_7_days_result[0]["all_time_taken"]:
-            all_sessions = sum(last_7_days_result[0]["all_time_taken"])
-            session_count = len(last_7_days_result[0]["all_time_taken"])
-            overall_avg_session_duration = round(all_sessions / session_count, 2) if session_count > 0 else 0
+            valid_times = [time for time in last_7_days_result[0]["all_time_taken"] if time is not None]
+            overall_avg_session_duration = round(sum(valid_times) / len(valid_times), 2) if valid_times else 0
         else:
             overall_avg_session_duration = 0
 
@@ -540,15 +539,14 @@ def get_avg_session_duration():
             {"$match": {"timestamp": {"$gte": previous_week_start, "$lte": previous_week_end}}},
             {"$group": {
                 "_id": None,
-                "all_time_taken": {"$push": {"$ifNull": ["$time_taken", 0]}}
+                "all_time_taken": {"$push": "$time_taken"}
             }}
         ]
         prev_week_results = list(Logs.aggregate(prev_week_pipeline))
 
         if prev_week_results and prev_week_results[0]["all_time_taken"]:
-            prev_sessions = sum(prev_week_results[0]["all_time_taken"])
-            prev_session_count = len(prev_week_results[0]["all_time_taken"])
-            prev_week_avg = round(prev_sessions / prev_session_count, 2) if prev_session_count > 0 else 0
+            valid_prev_times = [time for time in prev_week_results[0]["all_time_taken"] if time is not None]
+            prev_week_avg = round(sum(valid_prev_times) / len(valid_prev_times), 2) if valid_prev_times else 0
         else:
             prev_week_avg = 0
 

@@ -10,7 +10,11 @@ from insightface.app import FaceAnalysis
 import mediapipe as mp
 import cv2
 import requests
+from dotenv import load_dotenv
+# from azure.storage.blob import BlobServiceClient
+import uuid
 from collections import defaultdict
+from bson import Binary
 
 app = Flask(__name__)
 CORS(app)
@@ -27,6 +31,28 @@ User = db['Users']
 Logs = db["Logs"]
 Admins = db["Admins"]
 ChallengeLogs = db["ChallengeLogs"]
+
+# load_dotenv()
+# URI = os.getenv("mongo_URI")
+# client = MongoClient(URI)
+# db = client['Liveliness']
+# User = db['Users']
+# Logs = db["Logs"]
+# Admins = db["Admins"]
+
+# azure_string = os.getenv("azure_string")
+# container = os.getenv("container")
+# AZURE_CONNECTION_STRING = azure_string
+# AZURE_CONTAINER_NAME = container
+
+# blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+# container_client = blob_service_client.get_container_client(AZURE_CONTAINER_NAME)
+
+# def upload_to_azure_blob(file_bytes, filename):
+#     blob_name = f"{uuid.uuid4().hex}_{filename}"
+#     blob_client = container_client.get_blob_client(blob_name)
+#     blob_client.upload_blob(file_bytes, overwrite=True)
+#     return f"https://visiondetect.blob.core.windows.net/{AZURE_CONTAINER_NAME}/{blob_name}"
 
 face = FaceAnalysis(name="buffalo_l")
 face.prepare(ctx_id=0, det_size=(640, 640))
@@ -45,49 +71,52 @@ def get_active_users_by_day():
     # Last 7 days (including today)
     last_7_days = [(today - datetime.timedelta(days=i)).strftime('%Y-%m-%d') for i in range(6, -1, -1)]
 
-    # Query MongoDB for active users in the last 7 days (including today)
+    # Get all registered emails
+    registered_emails = set(user["email"] for user in User.find({}))
+
+    # Query logs for the last 7 days with login_status true
     query = {
         "timestamp": {"$gte": today - datetime.timedelta(days=6), "$lt": today + datetime.timedelta(days=1)},
         "login_success": True  # Only count successful logins
     }
+    all_logs = list(Logs.find(query))
 
-    # Fetch logs
-    active_users = list(Logs.find(query))
+    # Filter logs to only those by registered users
+    filtered_logs = [log for log in all_logs if log["email"] in registered_emails]
 
-    # Group users by day
-    active_counts = defaultdict(int)
+    # Count unique users per day
+    daily_user_set = defaultdict(set)
+    for log in filtered_logs:
+        date_str = log["timestamp"].strftime('%Y-%m-%d')
+        daily_user_set[date_str].add(log["email"])
 
-    for user in active_users:
-        date_str = user["timestamp"].strftime('%Y-%m-%d')  # Extract only the date
-        active_counts[date_str] += 1
+    active_users_per_day = [len(daily_user_set[day]) for day in last_7_days]
 
-    # Prepare final result (ensure all days are included)
-    active_users_per_day = [active_counts[day] for day in last_7_days]
+    # Total unique active users across the 7-day span
+    total_active_users = len(set(email for emails in daily_user_set.values() for email in emails))
 
-    # Compute change percentage with previous 7-day period
-    prev_week_query = {
+    # Previous 7-day period
+    prev_query = {
         "timestamp": {
             "$gte": today - datetime.timedelta(days=13),
             "$lt": today - datetime.timedelta(days=6)
         },
         "login_status": True
     }
-    prev_week_users = Logs.count_documents(prev_week_query)
-
-    # Total active users this week
-    total_active_users = sum(active_users_per_day)
+    prev_logs = list(Logs.find(prev_query))
+    prev_filtered_logs = [log for log in prev_logs if log["email"] in registered_emails]
+    prev_active_users = len(set(log["email"] for log in prev_filtered_logs))
 
     # Calculate percentage change
-    if prev_week_users == 0:
+    if prev_active_users == 0:
         percentage_change = 0
     else:
-        percentage_change = round(((total_active_users - prev_week_users) / prev_week_users) * 100, 2)
+        percentage_change = round(((total_active_users - prev_active_users) / prev_active_users) * 100, 2)
 
-    # Change arrow (increase or decrease)
-    change_arrow = "↑" if total_active_users > prev_week_users else "↓"
+    change_arrow = "up" if total_active_users > prev_active_users else "down"
 
     return {
-        "active_users_per_day": active_users_per_day,  # Already in chronological order
+        "active_users_per_day": active_users_per_day,
         "total_active_users": total_active_users,
         "percentage_change": percentage_change,
         "change_arrow": change_arrow,
@@ -212,13 +241,15 @@ def log_verification():
     time_taken = data.get("time_taken")
     longitude = data.get("longitude")
     location_data = get_location(latitude, longitude)
+    status = data.get("status", "Verified")  # default is "Verified"
+    detail = data.get("details", "Logged in Successfully")
 
     if not email:
         return jsonify({"status": "error", "message": "Missing email"}), 400
 
     result = Logs.find_one_and_update(
         {"email": email},
-        {"$set": {"verification_status": True, "status": "Verified", "detail": "Logged in Successfully",
+        {"$set": {"verification_status": True, "status": status, "detail": detail,
                   "location": location_data, "timestamp": datetime.datetime.now(), "time_taken": time_taken}},
         sort=[("timestamp", -1)]
     )
@@ -231,7 +262,6 @@ def log_verification():
 # registartion route
 @app.route("/register", methods=["POST"])
 def register():
-    # Get the images (front, left, right) from the form
     front_image = request.form.get("frontImage")
     left_image = request.form.get("leftImage")
     right_image = request.form.get("rightImage")
@@ -241,52 +271,68 @@ def register():
     latitude = request.form.get('latitude')
     longitude = request.form.get('longitude')
 
+    # os.makedirs("images", exist_ok=True)
+
     if latitude and longitude:
         location_data = get_location(latitude, longitude)
 
     if not all([front_image, left_image, right_image, name, email, password]):
         return jsonify({"status": "error", "message": "Missing required fields"}), 400  # Bad request
 
-    # Check if the user already exists
     if User.find_one({"email": email}):
         return jsonify({"status": "error", "message": "User already exists"}), 400
 
-    # Decode and save the images
+    # Decode and store the front image as a binary blob
+    front_image_data = base64.b64decode(front_image.split(",")[1])
+    front_image_blob = Binary(front_image_data)
+
+    # front_image_url = upload_to_azure_blob(front_image_data, "front.jpeg")
+
     images = [front_image, left_image, right_image]
     embeddings = []
 
+    Timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+
     for i, img_data in enumerate(images):
-        img_data = img_data.split(",")[1]  # Remove base64 prefix
-        Timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        os.makedirs("images", exist_ok=True)
+        if i == 0:
+            continue
+
+        img_data = img_data.split(",")[1]
         filename = f'images/{Timestamp}_{i}.jpeg'
         with open(filename, "wb") as f:
             f.write(base64.b64decode(img_data))
 
-        # Load the image and extract embeddings
         img = cv2.imread(filename)
         faces = face.get(img)
 
         if len(faces) == 0:
             return jsonify({"status": "error", "message": f"No face detected in image {i + 1}"}), 400
 
-        # Extract the first detected face embedding
         embeddings.append(faces[0].embedding)
 
-    # Compute the average embedding
     avg_embedding = np.mean(embeddings, axis=0).tolist()
 
-    # Save user data along with the average face embedding
     User.insert_one({
         "name": name,
         "email": email,
         "password": password,
-        "images": images,  # Optionally store the image filenames
-        "face_embedding": avg_embedding
+        # "user_image": front_image_url,
+        "user_image": front_image_blob,
+        "face_embedding": avg_embedding,
+        "timestamp": datetime.datetime.now()
     })
-    Logs.insert_one(
-        {"email": email, "name": name, "status": "In Process", "login_status": True, "verification_status": False,
-         "detail": "Registered", "location": location_data, "timestamp": datetime.datetime.now()})
+
+    Logs.insert_one({
+        "email": email,
+        "name": name,
+        "status": "In Process",
+        "login_status": True,
+        "verification_status": False,
+        "detail": "Registered",
+        "location": location_data,
+        "timestamp": datetime.datetime.now()
+    })
+
     return jsonify({"status": "success"})
 
 
@@ -328,21 +374,9 @@ def login():
         return jsonify(
             {"status": "success", "message": "Admin Login successful", "is_admin": is_admin})
 
-    Logs.insert_one(
-        {"email": email, "name": name, "status": "In Process", "login_success": True, "verification_status": False,
-         "detail": "Passed login, awaiting verification", "location": location_data,
-         "timestamp": datetime.datetime.now()})
+    Logs.insert_one({"email": email, "name": name, "status": "In Process", "login_success": True, "verification_status": False,
+                     "detail": "Passed login, awaiting verification", "location": location_data, "timestamp": datetime.datetime.now()})
     return jsonify({"status": "success", "message": "Login successful, proceed to verification", "is_admin": is_admin})
-
-
-''' use random function in frontend to send randomly selected task to backend at /verify route. This one has scalability issues '''
-
-
-# # route for sending random task to frontend
-# @app.route("/task", methods=["GET"])
-# def get_random_task():
-#     selected_task = random.choice(tasks)
-#     return jsonify({"task": selected_task})
 
 
 @app.route('/active-users', methods=['GET'])
@@ -442,7 +476,8 @@ def verify():
 
 @app.route("/get-logs", methods=["GET"])
 def get_logs():
-    logs = list(Logs.find().sort("timestamp", -1))  # Fetch logs in descending order
+    # logs = list(Logs.find().sort("timestamp", -1))  # Fetch logs in descending order
+    logs = list(Logs.find())
     for log in logs:
         log["_id"] = str(log["_id"])  # Convert ObjectId to string (for frontend)
     return jsonify(logs)
@@ -455,7 +490,7 @@ def get_avg_session_duration():
         start_date = today - datetime.timedelta(days=6)  # Last 7 days including today
 
         # Generate all dates in range
-        all_dates = {(start_date + datetime.timedelta(days=i)).strftime("%Y-%m-%d"): 0 for i in range(6)}
+        all_dates = {(start_date + datetime.timedelta(days=i)).strftime("%Y-%m-%d"): 0 for i in range(7)}
 
         # Aggregate logs to check for 'In Process' status and compute average session duration
         pipeline = [
@@ -476,7 +511,6 @@ def get_avg_session_duration():
 
         results = list(Logs.aggregate(pipeline))
 
-        # Process results
         for entry in results:
             date = entry["_id"]
             session_times = []
@@ -485,39 +519,35 @@ def get_avg_session_duration():
             for status_entry in entry["statuses"]:
                 if status_entry["status"] == "In Process":
                     in_process_found = True
-                session_times.extend(status_entry["time_taken"])
+                session_times.extend([time for time in status_entry["time_taken"] if time is not None])
 
-            # If 'In Process' is found, set first time_taken to 0
             if in_process_found and session_times:
                 session_times[0] = 0
 
-            # Compute average session duration
             avg_session_duration = sum(session_times) / len(session_times) if session_times else 0
             all_dates[date] = round(avg_session_duration, 2)
 
-        # Convert results to list format
-        last_7_days_data = [{"date": date, "average_session_duration": avg_duration} for date, avg_duration in
-                            all_dates.items()]
+        last_7_days_data = [{"date": date, "average_session_duration": avg_duration} for date, avg_duration in all_dates.items()]
 
-        # ---------------- Calculate Overall Average Session Duration ----------------
-        all_time_pipeline = [
+        # ----------------- Overall Avg (Last 7 Days Only) -----------------
+        last_7_days_pipeline = [
+            {"$match": {"timestamp": {"$gte": start_date}}},
             {"$group": {
                 "_id": None,
                 "all_time_taken": {"$push": "$time_taken"}
             }}
         ]
-        all_time_results = list(Logs.aggregate(all_time_pipeline))
+        last_7_days_result = list(Logs.aggregate(last_7_days_pipeline))
 
-        if all_time_results and all_time_results[0]["all_time_taken"]:
-            all_time_sessions = sum(all_time_results[0]["all_time_taken"])
-            all_time_count = len(all_time_results[0]["all_time_taken"])
-            overall_avg_session_duration = round(all_time_sessions / all_time_count, 2) if all_time_count > 0 else 0
+        if last_7_days_result and last_7_days_result[0]["all_time_taken"]:
+            valid_times = [time for time in last_7_days_result[0]["all_time_taken"] if time is not None]
+            overall_avg_session_duration = round(sum(valid_times) / len(valid_times), 2) if valid_times else 0
         else:
             overall_avg_session_duration = 0
 
-        # ---------------- Calculate Percentage Increase/Decrease ----------------
+        # ----------------- Previous Week Avg -----------------
         previous_week_start = today - datetime.timedelta(days=13)
-        previous_week_end = today - datetime.timedelta(days=6)  # Last week's range
+        previous_week_end = today - datetime.timedelta(days=7)
 
         prev_week_pipeline = [
             {"$match": {"timestamp": {"$gte": previous_week_start, "$lte": previous_week_end}}},
@@ -529,28 +559,81 @@ def get_avg_session_duration():
         prev_week_results = list(Logs.aggregate(prev_week_pipeline))
 
         if prev_week_results and prev_week_results[0]["all_time_taken"]:
-            prev_week_sessions = sum(prev_week_results[0]["all_time_taken"])
-            prev_week_count = len(prev_week_results[0]["all_time_taken"])
-            prev_week_avg = round(prev_week_sessions / prev_week_count, 2) if prev_week_count > 0 else 0
+            valid_prev_times = [time for time in prev_week_results[0]["all_time_taken"] if time is not None]
+            prev_week_avg = round(sum(valid_prev_times) / len(valid_prev_times), 2) if valid_prev_times else 0
         else:
             prev_week_avg = 0
 
-        # Calculate percentage difference
+        # ----------------- Percentage Change & Trend -----------------
         if prev_week_avg > 0:
             percentage_change = round(((overall_avg_session_duration - prev_week_avg) / prev_week_avg) * 100, 2)
         else:
-            percentage_change = 0  # Avoid division by zero
+            percentage_change = 0
 
-        # Determine up or down arrow indicator
         trend = "up" if percentage_change > 0 else "down" if percentage_change < 0 else "neutral"
 
-        # ---------------- Final Response ----------------
         return jsonify({
             "success": True,
             "last_7_days": last_7_days_data,
             "overall_avg_session_duration": overall_avg_session_duration,
             "percentage_change": percentage_change,
-            "trend": trend  # up/down arrow indication
+            "trend": trend
+        })
+
+    except Exception as e:
+        print("Error fetching session duration:", str(e))
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/user-stats', methods=['GET'])
+def get_user_stats():
+    try:
+        now = datetime.datetime.now()
+        start_of_this_week = now - datetime.timedelta(days=now.weekday())  # Monday 00:00 of this week
+        start_of_last_week = start_of_this_week - datetime.timedelta(days=7)
+        end_of_last_week = start_of_this_week - datetime.timedelta(seconds=1)
+
+        # Total users
+        total_users = User.count_documents({})
+        print(f"Total users: {total_users}")
+
+        # New users this week
+        new_users_this_week = User.count_documents({
+            "timestamp": {"$gte": start_of_this_week}
+        })
+        print(f"New users this week: {new_users_this_week}")
+
+        # New users last week
+        new_users_last_week = User.count_documents({
+            "timestamp": {"$gte": start_of_last_week, "$lte": end_of_last_week}
+        })
+        print(f"New users last week: {new_users_last_week}")
+
+        # Total users till end of last week
+        total_users_last_week = User.count_documents({
+            "timestamp": {"$lte": end_of_last_week}
+        })
+        print(f"Total users till end of last week: {total_users_last_week}")
+
+        # Percentage change in total users
+        total_change = total_users - total_users_last_week
+        percent_total_change = (total_change / total_users_last_week * 100) if total_users_last_week else 0
+        total_change_str = f"{percent_total_change:+.2f}%"
+        total_trend = "up" if percent_total_change > 0 else "down" if percent_total_change < 0 else "neutral"
+
+        # Percentage change in new users
+        new_user_change = new_users_this_week - new_users_last_week
+        percent_new_user_change = (new_user_change / new_users_last_week * 100) if new_users_last_week else 0
+        new_user_change_str = f"{percent_new_user_change:+.2f}%"
+        new_user_trend = "up" if percent_new_user_change > 0 else "down" if percent_new_user_change < 0 else "neutral"
+
+        return jsonify({
+            "total_users": total_users,
+            "total_users_change": total_change_str,
+            "total_users_trend": total_trend,
+            "new_users_this_week": new_users_this_week,
+            "new_users_change": new_user_change_str,
+            "new_users_trend": new_user_trend
         })
 
     except Exception as e:

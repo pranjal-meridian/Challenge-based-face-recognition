@@ -260,7 +260,8 @@ def register():
     longitude = request.form.get('longitude')
 
     # os.makedirs("images", exist_ok=True)
-
+    os.makedirs("images", exist_ok=True)
+    
     if latitude and longitude:
         location_data = get_location(latitude, longitude)
 

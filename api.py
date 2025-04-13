@@ -11,7 +11,7 @@ import mediapipe as mp
 import cv2
 import requests
 from dotenv import load_dotenv
-# from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient
 import uuid
 from collections import defaultdict
 from bson import Binary
@@ -24,36 +24,29 @@ ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 img1_path = "test.png"
 
-# Connect to MongoDB
 
-URI = "mongodb://localhost:27017/"
-client = MongoClient('mongodb://localhost:27017/')
+load_dotenv()
+URI = os.getenv("mongo_URI")
+client = MongoClient(URI)
 db = client['Liveliness']
 User = db['Users']
 Logs = db["Logs"]
 Admins = db["Admins"]
+ChallengeLogs = db["ChallengeLogs"]
 
-# load_dotenv()
-# URI = os.getenv("mongo_URI")
-# client = MongoClient(URI)
-# db = client['Liveliness']
-# User = db['Users']
-# Logs = db["Logs"]
-# Admins = db["Admins"]
+azure_string = os.getenv("azure_string")
+container = os.getenv("container")
+AZURE_CONNECTION_STRING = azure_string
+AZURE_CONTAINER_NAME = container
 
-# azure_string = os.getenv("azure_string")
-# container = os.getenv("container")
-# AZURE_CONNECTION_STRING = azure_string
-# AZURE_CONTAINER_NAME = container
+blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+container_client = blob_service_client.get_container_client(AZURE_CONTAINER_NAME)
 
-# blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
-# container_client = blob_service_client.get_container_client(AZURE_CONTAINER_NAME)
-
-# def upload_to_azure_blob(file_bytes, filename):
-#     blob_name = f"{uuid.uuid4().hex}_{filename}"
-#     blob_client = container_client.get_blob_client(blob_name)
-#     blob_client.upload_blob(file_bytes, overwrite=True)
-#     return f"https://visiondetect.blob.core.windows.net/{AZURE_CONTAINER_NAME}/{blob_name}"
+def upload_to_azure_blob(file_bytes, filename):
+    blob_name = f"{uuid.uuid4().hex}_{filename}"
+    blob_client = container_client.get_blob_client(blob_name)
+    blob_client.upload_blob(file_bytes, overwrite=True)
+    return f"https://visiondetect.blob.core.windows.net/{AZURE_CONTAINER_NAME}/{blob_name}"
 
 face = FaceAnalysis(name="buffalo_l")
 face.prepare(ctx_id=0, det_size=(640, 640))
@@ -231,7 +224,6 @@ def get_location(latitude, longitude):
 
 @app.route("/log-verification", methods=["POST"])
 def log_verification():
-    print("trying to set rejected")
     data = request.json
     email = data.get("email")
     latitude = data.get("latitude")
@@ -248,9 +240,7 @@ def log_verification():
     result = Logs.find_one_and_update(
         {"email": email},
         {"$set": {"verification_status": True, "status": status, "detail": detail,
-                  "location": location_data, "timestamp": datetime.datetime.now(), "time_taken": time_taken}},
-        sort=[("timestamp", -1)]
-    )
+                  "location": location_data, "timestamp": datetime.datetime.now(), "time_taken": time_taken}})
     if result:
         return jsonify({"status": "success", "message": "Verified successfully in db."})
     else:
@@ -270,6 +260,7 @@ def register():
     longitude = request.form.get('longitude')
 
     # os.makedirs("images", exist_ok=True)
+    os.makedirs("images", exist_ok=True)
 
     if latitude and longitude:
         location_data = get_location(latitude, longitude)
@@ -281,21 +272,21 @@ def register():
         return jsonify({"status": "error", "message": "User already exists"}), 400
 
     # Decode and store the front image as a binary blob
-    front_image_data = base64.b64decode(front_image.split(",")[1])  
+    front_image_data = base64.b64decode(front_image.split(",")[1])
     front_image_blob = Binary(front_image_data)
 
     # front_image_url = upload_to_azure_blob(front_image_data, "front.jpeg")
 
-    images = [front_image, left_image, right_image] 
+    images = [front_image, left_image, right_image]
     embeddings = []
 
     Timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
 
     for i, img_data in enumerate(images):
-        if i == 0:  
+        if i == 0:
             continue
 
-        img_data = img_data.split(",")[1]  
+        img_data = img_data.split(",")[1]
         filename = f'images/{Timestamp}_{i}.jpeg'
         with open(filename, "wb") as f:
             f.write(base64.b64decode(img_data))
@@ -314,7 +305,6 @@ def register():
         "name": name,
         "email": email,
         "password": password,
-        # "user_image": front_image_url,
         "user_image": front_image_blob,
         "face_embedding": avg_embedding,
         "timestamp": datetime.datetime.now()
@@ -429,7 +419,7 @@ def verify():
 
         similarity = np.dot(normalize(captured_embedding), normalize(reference_embedding))
         print(similarity)
-        threshold = 0.6  # Adjust based on performance
+        threshold = 0.5  # Adjust based on performance
 
         # Check face match
         face_match = "Matched" if similarity >= threshold else "Not Matched"
@@ -441,10 +431,32 @@ def verify():
         task_validity = ""
         task_result = validate_task(img)
         print("Detected task", task_result)
+
+        ChallengeLogs.update_one(
+            {"email": email},
+            {
+                "$setOnInsert": {
+                    "correct_Up": 0, "correct_Left": 0, "correct_Right": 0, "correct_Front": 0,
+                    "failed_Up": 0, "failed_Left": 0, "failed_Right": 0, "failed_Front": 0
+                }
+            },
+            upsert=True
+        )
+
         if task_result == selected_task:
             task_validity = "Correct"
+            correct_task = "correct_" + selected_task
+            ChallengeLogs.update_one(
+                {"email": email},
+                {"$inc": {correct_task: 1}}
+            )
         else:
             task_validity = "Incorrect"
+            failed_task = "failed_" + selected_task
+            ChallengeLogs.update_one(
+                {"email": email},
+                {"$inc": {failed_task: 1}}
+            )
 
         # Response
         return jsonify({
@@ -462,8 +474,10 @@ def verify():
 
 @app.route("/get-logs", methods=["GET"])
 def get_logs():
-    # logs = list(Logs.find().sort("timestamp", -1))  # Fetch logs in descending order
-    logs = list(Logs.find())
+    Logs.create_index([("timestamp", -1)])
+
+    logs = list(Logs.find().sort("timestamp", -1))  # Fetch logs in descending order
+    #logs = list(Logs.find())
     for log in logs:
         log["_id"] = str(log["_id"])  # Convert ObjectId to string (for frontend)
     return jsonify(logs)
@@ -478,7 +492,7 @@ def get_avg_session_duration():
         # Generate all dates in range
         all_dates = {(start_date + datetime.timedelta(days=i)).strftime("%Y-%m-%d"): 0 for i in range(7)}
 
-        # ----------------- Daily Average Session Duration -----------------
+        # Aggregate logs to check for 'In Process' status and compute average session duration
         pipeline = [
             {"$match": {"timestamp": {"$gte": start_date}}},
             {"$group": {
@@ -624,6 +638,44 @@ def get_user_stats():
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/get-failed-tasks', methods=["GET"])
+def get_failed_tasks():
+    try:
+        fields = [
+            "correct_Up", "correct_Down", "correct_Left", "correct_Right", "correct_Front",
+            "failed_Up", "failed_Down", "failed_Left", "failed_Right", "failed_Front"
+        ]
+
+        counts = {}
+        for field in fields:
+            counts[field] = ChallengeLogs.count_documents({field: {"$gt": 0}})
+
+        return jsonify(counts), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/get-top-rejected-users', methods=["GET"])
+def get_top_rejected_users():
+    try:
+        # Fetch logs with status: Rejected
+        rejected_users = list(Logs.find({"status": "Rejected"}).sort("timestamp", -1))
+
+        # Count occurrences of each user
+        user_counts = defaultdict(int)
+        for log in rejected_users:
+            user_counts[log["email"]] += 1
+
+        # Sort users by count and get top 4
+        sorted_users = sorted(user_counts.items(), key=lambda x: x[1], reverse=True)[:4]
+
+        # Prepare final result
+        top_rejected_users = [{"email": email, "count": count} for email, count in sorted_users]
+
+        return jsonify(top_rejected_users)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

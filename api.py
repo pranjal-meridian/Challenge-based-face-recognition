@@ -11,6 +11,7 @@ import mediapipe as mp
 import cv2
 import requests
 from dotenv import load_dotenv
+from werkzeug.security import generate_password_hash, check_password_hash
 from azure.storage.blob import BlobServiceClient
 import uuid
 from collections import defaultdict
@@ -203,7 +204,8 @@ def check_liveness(img):
     try:
         result = DeepFace.extract_faces(img_path=img, detector_backend="opencv", enforce_detection=False, align=False,
                                         anti_spoofing=True)
-        return "Live" if result[0]["antispoof_score"] > 0.5 else "Spoof"
+        print("anti spoof score: ", result[0]["antispoof_score"])
+        return "Live" if result[0]["is_real"] else "Spoof"
     except Exception as e:
         print("Liveness detection error:", e)
     return "Unknown"
@@ -240,7 +242,9 @@ def log_verification():
     result = Logs.find_one_and_update(
         {"email": email},
         {"$set": {"verification_status": True, "status": status, "detail": detail,
-                  "location": location_data, "timestamp": datetime.datetime.now(), "time_taken": time_taken}})
+                  "location": location_data, "timestamp": datetime.datetime.now(), "time_taken": time_taken}},
+    sort=[("timestamp", -1)]
+    )
     if result:
         return jsonify({"status": "success", "message": "Verified successfully in db."})
     else:
@@ -304,7 +308,7 @@ def register():
     User.insert_one({
         "name": name,
         "email": email,
-        "password": password,
+        "password": generate_password_hash(password),
         "user_image": front_image_blob,
         "face_embedding": avg_embedding,
         "timestamp": datetime.datetime.now()
@@ -343,7 +347,7 @@ def login():
                          "detail": "User not found", "location": location_data, "timestamp": datetime.datetime.now()})
         return jsonify({"status": "error", "message": "User not found"}), 404
 
-    if user["password"] != password:
+    if not check_password_hash(user["password"], password):
         Logs.insert_one({"email": email, "name": name, "status": "Rejected", "login_status": False, "verification_status": False,
                          "detail": "Invalid password", "location": location_data, "timestamp": datetime.datetime.now()})
         return jsonify({"status": "error", "message": "Invalid password"}), 401

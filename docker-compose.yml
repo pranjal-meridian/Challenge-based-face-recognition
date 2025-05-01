@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/app
+      - upload-data:/path/to/the/uploads
+    environment:
+      - mongo_URI=${mongo_URI}
+      - azure_string=${azure_string}
+      - container=${container}
+
+volumes:
+  upload-data:

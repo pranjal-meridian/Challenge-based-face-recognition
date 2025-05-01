@@ -1,0 +1,15 @@
+flask
+flask-cors
+pymongo
+python-dotenv
+werkzeug
+opencv-python==4.11.0.86
+numpy==1.26.4
+deepface==0.0.93
+azure-storage-blob
+mediapipe==0.10.21
+requests
+onnx==1.17.0
+onnxruntime==1.20.1
+insightface==0.7.3
+tf-keras==2.18.0
